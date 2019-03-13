@@ -80,7 +80,8 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile _ _ = failwith "Not yet implemented"
+(*let compile _ _ = failwith "Not yet implemented"
+*)
 
 (* A set of strings *)           
 module S = Set.Make (String)
@@ -130,6 +131,70 @@ class env =
 (* compiles a unit: generates x86 machine code for the stack program and surrounds it
    with function prologue/epilogue
 *)
+let get_operation_suf op = match op with
+  | "<"  -> "l"
+  | "<=" -> "le"
+  | ">"  -> "g"
+  | ">=" -> "ge"
+  | "==" -> "e"
+  | "!=" -> "ne"
+  | _    -> failwith ("Unknown bool operator")
+
+ let rec compile_binop env op : env * instr list = 
+  let zero opnd = Binop ("^", opnd, opnd) in
+  let compare op l r space = [zero eax; Binop ("cmp", r, l); Set (get_operation_suf op, "%al"); Mov (eax, space)] in
+  let r, l, env  = env#pop2 in
+  let space, env = env#allocate in
+  let instr_list = match op with
+    | "+" 
+    | "-" 
+    | "*"  -> (match (l, r) with
+                 | (S _, S _) -> [Mov (l, eax); Binop (op, r, eax); Mov (eax, space)]
+                 | _          -> if space = l then 
+                                    [Binop (op, r, l)] 
+                                 else 
+                                    [Binop (op, r, l); Mov (l, space)]
+              )
+    | "<=" 
+    | "<" 
+    | ">=" 
+    | ">" 
+    | "==" 
+    | "!=" -> (match (l, r) with
+                 | (S _, S _) -> [Mov (l, edx)] @ compare op edx r space
+                 | _          -> compare op l r space
+              )
+    | "/"  -> [Mov (l, eax); zero edx; Cltd; IDiv r; Mov (eax, space)]        
+    | "%"  -> [Mov (l, eax); zero edx; Cltd; IDiv r; Mov (edx, space)]
+    | "!!" -> [zero eax; Mov (l, edx); Binop ("!!", r, edx); Set ("nz", "%al"); Mov (eax, space)]
+    | "&&" -> [zero eax; zero edx; Binop ("cmp", L 0, l); Set ("ne", "%al");
+                                   Binop ("cmp", L 0, r); Set ("ne", "%dl");
+                                   Binop ("&&", edx, eax); Mov   (eax, space)
+                  ]
+    | _ -> failwith ("Unknown bin operand")
+  in env, instr_list
+
+ (* Symbolic stack machine evaluator
+      compile : env -> prg -> env * instr list
+    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
+   of x86 instructions
+*)
+let rec compile env prg : env * instr list = match prg with
+  | [] -> env, []
+  | ins::tail -> 
+    let new_env, instr_list = (match ins with
+      | BINOP op -> compile_binop env op
+      | CONST x  -> let space, new_env1 = env#allocate       in new_env1, [Mov (L x, space)]
+      | READ     -> let space, new_env1 = env#allocate       in new_env1, [Call "Lread"; Mov (eax, space)]
+      | WRITE    -> let var  , new_env1 = env#pop            in new_env1, [Push var; Call "Lwrite"; Pop eax]
+      | LD x     -> let space, new_env1 = env#allocate       in
+                    let var            = env#loc x           in new_env1, [Mov ((M var), space)]
+      | ST x     -> let value, new_env1 = (env#global x)#pop in
+                    let var            = env#loc x           in new_env1, [Mov (value, (M var))]
+      ) in
+    let result_env, result_inst_list = compile new_env tail in
+    result_env, (instr_list @ result_inst_list)
+
 let compile_unit env scode =  
   let env, code = compile env scode in
   env, 
