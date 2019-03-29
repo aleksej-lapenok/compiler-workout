@@ -43,8 +43,34 @@ module Expr =
  
        Takes a state and an expression, and returns the value of the expression in 
        the given state.
-    *)                                                       
-    let eval st expr = failwith "Not yet implemented"
+    *)
+    let fromBool b = if b then 1 else 0
+
+    let toBool b = b <> 0 
+
+    let ($) f1 f2 a b = f2 (f1 a b)
+
+    let getFunction op = match op with 
+       | "+" -> (+)
+       | "-" -> (-)
+       | "*" -> ( * )
+       | "/" -> (/)
+       | "%" -> (mod)
+       | "<" -> (<) $ fromBool
+       | "<=" -> (<=) $ fromBool
+       | ">" -> (>) $ fromBool
+       | ">=" -> (>=) $ fromBool
+       | "==" -> (=) $ fromBool
+       | "!=" -> (<>) $ fromBool 
+       | "&&" -> fun x y -> fromBool ((&&) (toBool x) (toBool y)) 
+       | "!!" -> fun x y -> fromBool ((||) (toBool x) (toBool y))
+       | _ -> raise Not_found
+
+    let rec eval state expr =  match expr with
+       | Const a -> a
+       | Var x -> state x
+       | Binop (op, x, y) -> (getFunction op) 
+            (eval state x) (eval state y)
 
     (* Expression parser. You can use the following terminals:
 
@@ -52,8 +78,25 @@ module Expr =
          DECIMAL --- a decimal constant [0-9]+ as a string
                                                                                                                   
     *)
-    ostap (                                      
-      parse: empty {failwith "Not yet implemented"}
+
+    let parseBinop op = ostap(- $(op)), (fun x y -> Binop(op, x, y))
+
+    ostap (
+      expr: 
+           !(Ostap.Util.expr
+                 (fun x -> x)
+                 (Array.map (fun (assoc, ops) -> assoc, List.map parseBinop ops)
+                  [|
+                     `Lefta, ["!!"];
+                     `Lefta, ["&&"];
+                     `Nona, ["<="; "<"; ">="; ">"; "=="; "!="];
+                     `Lefta, ["+"; "-"];
+                     `Lefta, ["*"; "/"; "%"];
+                  |]
+                 )
+                 primary
+             );
+      primary: n:DECIMAL {Const n} | x:IDENT {Var x} | -"(" expr -")"
     )
     
   end
@@ -71,8 +114,8 @@ module Stmt =
     (* empty statement                  *) | Skip
     (* conditional                      *) | If     of Expr.t * t * t
     (* loop with a pre-condition        *) | While  of Expr.t * t
-    (* loop with a post-condition       *) (* add yourself *)  with show
-                                                                    
+    (* loop with a post-condition       *) | Repeat of t * Expr.t with show
+
     (* The type of configuration: a state, an input stream, an output stream *)
     type config = Expr.state * int list * int list 
 
@@ -82,11 +125,68 @@ module Stmt =
 
        Takes a configuration and a statement, and returns another configuration
     *)
-    let rec eval conf stmt = failwith "Not yet implemented"
-                               
+
+    (* Statement parser *)
+    (*ostap (
+      parse: empty {failwith "Not yet implemented"}
+ 
+          val eval : config -> t -> config
+
+       Takes a configuration and a statement, and returns another configuration
+    )
+*)
+    let rec eval (state, input, output) stmt = match stmt with
+        | Read x -> (match input with
+                    | head :: tail -> (Expr.update x head state, tail, output)
+                    | _ -> failwith ("Empty input")
+                    )
+        | Write e -> (state, input, output @ [Expr.eval state e])
+        | Assign (x, e) -> (Expr.update x (Expr.eval state e) state, input, output)
+        | Seq (stmt1, stmt2) -> eval (eval (state, input, output) stmt1) stmt2 
+        | If (cond, thn, els) -> if Expr.toBool (Expr.eval state cond) then
+                                     eval (state, input, output) thn
+                                 else 
+                                     eval (state, input, output) els
+        | While (cond, body) -> if not (Expr.toBool (Expr.eval state cond)) then 
+                                   (state, input, output)
+                                else  
+                                   eval (eval (state, input, output) body) @@ stmt
+        | Repeat (body, cond) -> let conf' = eval (state, input, output) body in
+                                      let (state', _, _) = conf' in
+                                      if Expr.toBool (Expr.eval state' cond) then
+                                           conf'
+                                      else 
+                                          eval conf' stmt
+        | Skip -> (state, input, output)
+
     (* Statement parser *)
     ostap (
-      parse: empty {failwith "Not yet implemented"}
+      line: 
+          "read"  "(" x:IDENT ")"          {Read x}
+        | "write" "(" e:!(Expr.expr) ")"   {Write e}
+        | x:IDENT ":=" e:!(Expr.expr)     {Assign (x, e)}
+        | "while" condition:!(Expr.expr) "do" body:parse "od" { While (condition, body)}
+        | "for" init:!(parse) "," cond:!(Expr.expr) "," step:parse "do" body:parse "od"
+            {
+                Seq(init, While(cond, Seq(body, step)))
+            }
+        | "repeat" body:parse "until" cond:!(Expr.expr)
+            { 
+                Repeat (body, cond)
+            }
+        | "skip" {Skip}
+        | "if" i:ifParse {i}
+        ;
+
+      ifParse: condition:!(Expr.expr) "then" stmt1:parse stmt2:elseParse {If (condition, stmt1, stmt2) }
+      ;
+
+      elseParse:  "fi" {Skip}
+        | "else" stmt:parse "fi" {stmt}
+        | "elif" i:ifParse {i}
+        ;
+ 
+        parse: l:line ";" rest:parse {Seq (l, rest)} | line
     )
       
   end
