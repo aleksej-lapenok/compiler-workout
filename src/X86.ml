@@ -86,7 +86,6 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile _ = failwith "Not Implemented Yet"
 
 (* A set of strings *)           
 module S = Set.Make (String)
@@ -134,6 +133,83 @@ class env =
     method globals = S.elements globals
   end
 
+let get_operation_suf op = match op with
+  | "<"  -> "l"
+  | "<=" -> "le"
+  | ">"  -> "g"
+  | ">=" -> "ge"
+  | "==" -> "e"
+  | "!=" -> "ne"
+  | _    -> failwith ("Unknown bool operator")
+
+let zero opnd = Binop ("^", opnd, opnd)
+
+let binop op l r = Binop (op, l, r)
+
+let move_op op l r =
+   match l, r with
+    | (R _, _)
+    | (L _, _)
+    | (_, R _) -> r, [op l r]
+    | _ -> edx, [Mov (r, edx); op l edx]
+
+let compare op l r space =
+    let _, code = move_op (binop "cmp") l r in
+    [zero eax] @ code @ [Set (get_operation_suf op, "%al"); Mov (eax, space)]
+
+ let rec compile_binop env op : env * instr list =
+  let r, l, env  = env#pop2 in
+  let space, env = env#allocate in
+  let instr_list = match op with
+    | "+"
+    | "-"
+    | "*"  -> let out, code = move_op (binop op) r l in
+              code @ [Mov (out, space)]
+    | "<="
+    | "<"
+    | ">="
+    | ">"
+    | "=="
+    | "!=" -> compare op r l space
+    | "/"  -> [Mov (l, eax); zero edx; Cltd; IDiv r; Mov (eax, space)]
+    | "%"  -> [Mov (l, eax); zero edx; Cltd; IDiv r; Mov (edx, space)]
+    | "!!" -> [zero edx; Mov (l, eax); Binop ("!!", r, eax); Binop("cmp", L 0, eax); Set ("ne", "%dl"); Mov (edx, space)]
+    | "&&" -> [zero eax; zero edx; Binop ("cmp", L 0, l); Set ("ne", "%al");
+                                   Binop ("cmp", L 0, r); Set ("ne", "%dl");
+                                   Binop ("&&", edx, eax); Mov (eax, space)
+                  ]
+    | _ -> failwith ("Unknown bin operand")
+  in env, instr_list
+
+let make_move src dest = match src, dest with
+   | (R _, _)
+   | (L _, _)
+   | (_, R _) -> [Mov (src, dest)]
+   | _ -> [Mov (src, eax); Mov(eax, dest)]
+
+ (* Symbolic stack machine evaluator
+      compile : env -> prg -> env * instr list
+    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
+   of x86 instructions
+*)
+let rec compile env prg : env * instr list = match prg with
+  | [] -> env, []
+  | ins::tail ->
+    let new_env, instr_list = (match ins with
+      | BINOP op -> compile_binop env op
+      | CONST x  -> let space, new_env1 = env#allocate       in new_env1, [Mov (L x, space)]
+      | READ     -> let space, new_env1 = env#allocate       in new_env1, [Call "Lread"; Mov (eax, space)]
+      | WRITE    -> let var  , new_env1 = env#pop            in new_env1, [Push var; Call "Lwrite"; Pop eax]
+      | LD x     -> let space, new_env1 = env#allocate       in
+                    let var            = env#loc x           in new_env1, make_move (M var) space
+      | ST x     -> let value, new_env1 = (env#global x)#pop in
+                    let var            = env#loc x           in new_env1, make_move value (M var)
+      | LABEL l  -> env, [Label l]
+      | JMP l    -> env, [Jmp l]
+      | CJMP (c, l) -> let var, new_env1 = env#pop           in new_env1, [Binop ("cmp", L 0, var); CJmp (c, l)]
+      ) in
+    let result_env, result_inst_list = compile new_env tail in
+    result_env, (instr_list @ result_inst_list)
 (* Compiles a unit: generates x86 machine code for the stack program and surrounds it
    with function prologue/epilogue
 *)
