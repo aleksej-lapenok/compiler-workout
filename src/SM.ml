@@ -109,6 +109,8 @@ let rec compileStmt env code =
   | Expr.Var   x          -> [LD x]
   | Expr.Const n          -> [CONST n]
   | Expr.Binop (op, x, y) -> expr x @ expr y @ [BINOP op]
+  | Expr.Call (f, args) -> let cArgs = List.concat (List.map expr (List.rev args)) in
+                           cArgs @ [CALL (f, List.length args, true)]
   in
   let rec stmt env =
      let rec if_stmt env outLabel = function

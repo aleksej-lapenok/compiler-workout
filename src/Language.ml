@@ -131,7 +131,11 @@ module Expr =
                  )
                  primary
              );
-      primary: n:DECIMAL {Const n} | x:IDENT {Var x} | -"(" expr -")"
+      primary: n:DECIMAL {Const n}
+             | f:IDENT "(" args:!(Util.list0 expr) ")" {Call (f, args)}
+             | x:IDENT {Var x}
+             | -"(" expr -")"
+
     )
 
   end
@@ -164,9 +168,9 @@ module Stmt =
     | Skip -> stmt
     | _ -> Seq (stmt, k)
 
-    let rec eval env (state, input, output, result) k stmt = match stmt with
+    let rec eval env ((state, input, output, result) as conf) k stmt = match stmt with
         | Read x -> (match input with
-                    | head :: tail -> (State.update x head state, tail, output, None)
+                    | head :: tail -> eval env (State.update x head state, tail, output, None) Skip k
                     | _ -> failwith ("Empty input")
                     )
         | Write e -> let (state1, input1, output1, Some value) = Expr.eval env (state, input, output, result) e in
@@ -186,8 +190,8 @@ module Stmt =
                                    eval env (state1, input1, output1, None) (cont k stmt) body
         | Repeat (body, cond) -> eval env (state, input, output, result) (cont k (While (Expr.Binop ("==", cond, Expr.Const 0), body))) body
         | Skip -> (match k with
-                  | Skip -> (state, input, output, result)
-                  | _ -> eval env (state, input, output, result) Skip k
+                  | Skip -> conf
+                  | _ -> eval env conf Skip k
                   )
         | Call (name, args) -> eval env (Expr.eval env (state, input, output, result) (Expr.Call (name, args))) Skip k
         | Return res -> (match res with
@@ -237,7 +241,8 @@ module Definition =
     type t = string * (string list * string list * Stmt.t)
 
     ostap (
-          parse: "fun" name:IDENT "(" args:IDENT* ")" local: (%"local" IDENT*)? "{" body:!(Stmt.parse) "}" {
+          arg: IDENT;
+          parse: "fun" name:IDENT "(" args:!(Util.list0 arg) ")" local: (%"local" local:!(Util.list0 arg))? "{" body:!(Stmt.parse) "}" {
             let l = (match local with
             | Some v -> v
             | _ -> []
