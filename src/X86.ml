@@ -90,13 +90,116 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile env code = failwith "Not implemented"
-                                
 (* A set of strings *)           
 module S = Set.Make (String)
 
+let rec init_impl n = if n < 0 then
+                         []
+                      else
+                         n :: init_impl (n - 1)
+let list_init n = List.rev (init_impl (n - 1))
+
+let get_operation_suf op = match op with
+  | "<"  -> "l"
+  | "<=" -> "le"
+  | ">"  -> "g"
+  | ">=" -> "ge"
+  | "==" -> "e"
+  | "!=" -> "ne"
+  | _    -> failwith ("Unknown bool operator")
+
+let zero opnd = Binop ("^", opnd, opnd)
+
+let binop op l r = Binop (op, l, r)
+
+let move_op op l r =
+   match l, r with
+    | (R _, _)
+    | (L _, _)
+    | (_, R _) -> r, [op l r]
+    | _ -> edx, [Mov (r, edx); op l edx]
+
+let compare op l r space =
+    let _, code = move_op (binop "cmp") l r in
+    [zero eax] @ code @ [Set (get_operation_suf op, "%al"); Mov (eax, space)]
+
+ let rec compile_binop env op =
+  let r, l, env  = env#pop2 in
+  let space, env = env#allocate in
+  let instr_list = match op with
+    | "+"
+    | "-"
+    | "*"  -> let out, code = move_op (binop op) r l in
+              code @ [Mov (out, space)]
+    | "<="
+    | "<"
+    | ">="
+    | ">"
+    | "=="
+    | "!=" -> compare op r l space
+    | "/"  -> [Mov (l, eax); zero edx; Cltd; IDiv r; Mov (eax, space)]
+    | "%"  -> [Mov (l, eax); zero edx; Cltd; IDiv r; Mov (edx, space)]
+    | "!!" -> [zero edx; Mov (l, eax); Binop ("!!", r, eax); Binop("cmp", L 0, eax); Set ("ne", "%dl"); Mov (edx, space)]
+    | "&&" -> [zero eax; zero edx; Binop ("cmp", L 0, l); Set ("ne", "%al");
+                                   Binop ("cmp", L 0, r); Set ("ne", "%dl");
+                                   Binop ("&&", edx, eax); Mov (eax, space)
+                  ]
+    | _ -> failwith ("Unknown bin operand")
+  in env, instr_list
+
+let make_move src dest = match src, dest with
+   | (R _, _)
+   | (L _, _)
+   | (_, R _) -> [Mov (src, dest)]
+   | _ -> [Mov (src, eax); Mov(eax, dest)]
+
+ (* Symbolic stack machine evaluator
+      compile : env -> prg -> env * instr list
+    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
+   of x86 instructions
+*)
+let rec compile env prg = match prg with
+  | [] -> env, []
+  | ins::tail ->
+    let new_env, instr_list = (match ins with
+      | BINOP op -> compile_binop env op
+      | CONST x  -> let space, new_env1 = env#allocate       in new_env1, [Mov (L x, space)]
+      | READ     -> let space, new_env1 = env#allocate       in new_env1, [Call "Lread"; Mov (eax, space)]
+      | WRITE    -> let var  , new_env1 = env#pop            in new_env1, [Push var; Call "Lwrite"; Pop eax]
+      | LD x     -> let space, new_env1 = env#allocate       in
+                    let var             = env#loc x          in new_env1, make_move var space
+      | ST x     -> let value, new_env1 = (env#global x)#pop in
+                    let var             = env#loc x          in new_env1, make_move value var
+      | LABEL l  -> env, [Label l]
+      | JMP l    -> env, [Jmp l]
+      | CJMP (c, l) -> let var, new_env1 = env#pop           in new_env1, [Binop ("cmp", L 0, var); CJmp (c, l)]
+      | CALL (f, argCnt, flag) -> let accum = (fun (env, args) _ -> let var, new_env = env#pop in (new_env, var :: args)) in
+                                   let (env, args) = List.fold_left accum (env, []) (list_init argCnt) in
+                                   let pushArgs = List.map (fun x -> Push x) args in
+                                   let (env, result) = if flag then
+                                                          let (space, new_env) = env#allocate in new_env, [Mov (eax, space)]
+                                                       else
+                                                          env, [] in
+                                   env, pushArgs @ [Call f; binop "+" (L (argCnt * word_size)) esp] @ result
+      | BEGIN (f, args, locals) -> let pushRegs = List.map (fun x -> Push (R x)) (list_init num_of_regs) in
+                                   let prolog = [Push ebp; Mov (esp, ebp)] in
+                                   let env = env#enter f args locals in
+                                   env, prolog @ pushRegs @ [binop "-" (M ("$" ^ env#lsize)) esp]
+      | END -> let popRegs = List.map (fun x -> Pop (R x)) (List.rev (list_init num_of_regs)) in
+               let meta = [Meta (Printf.sprintf "\t.set %s, %d" env#lsize (env#allocated * word_size))] in
+               let epilogue = [Mov (ebp, esp); Pop ebp; Ret] in
+               env, [Label env#epilogue] @ popRegs @ epilogue @ meta
+      | RET flag -> if flag then
+                       let var, new_env = env#pop in
+                       env, [Mov (var, eax); Jmp env#epilogue]
+                    else
+                       env, [Jmp env#epilogue]
+      ) in
+    let result_env, result_inst_list = compile new_env tail in
+    result_env, (instr_list @ result_inst_list)
+
 (* Environment implementation *)
-let make_assoc l = List.combine l (List.init (List.length l) (fun x -> x))
+let make_assoc l = List.combine l (list_init (List.length l))
                      
 class env =
   object (self)
