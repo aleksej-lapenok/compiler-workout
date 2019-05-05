@@ -172,8 +172,7 @@ module Expr =
 
        which takes an environment (of the same type), a name of the function, a list of actual parameters and a configuration, 
        an returns a pair: the return value for the call and the resulting configuration
-    *)                                                       
-<<<<<<< HEAD
+    *)
     let to_func op =
       let bti   = function true -> 1 | _ -> 0 in
       let itb b = b <> 0 in
@@ -294,6 +293,7 @@ module Expr =
                                                                             | Some subs -> Sexp (name, subs)
                                                                             | _ -> Sexp (name, [])
                                                                            }
+    )
     
   end
                     
