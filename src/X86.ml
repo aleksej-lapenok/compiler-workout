@@ -90,8 +90,21 @@ open SM
    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
    of x86 instructions
 *)
-let compile env code =
-  let suffix = function
+(* A set of strings *)
+module S = Set.Make (String)
+
+(* A map indexed by strings *)
+module M = Map.Make (String)
+
+(* Environment implementation *)
+
+let rec init_impl n = if n < 0 then
+                         []
+                      else
+                         n :: init_impl (n - 1)
+let list_init n = List.rev (init_impl (n - 1))
+
+let get_operation_suf op = match op with
   | "<"  -> "l"
   | "<=" -> "le"
   | "==" -> "e"
@@ -256,12 +269,53 @@ let compile env code =
 	env'', code' @ code''
   in
   compile' env code
-
-(* A set of strings *)           
-module S = Set.Make (String)
-
-(* A map indexed by strings *)
-module M = Map.Make (String)
+ (* Symbolic stack machine evaluator
+      compile : env -> prg -> env * instr list
+    Take an environment, a stack machine program, and returns a pair --- the updated environment and the list
+   of x86 instructions
+*)
+let rec compile env prg = match prg with
+  | [] -> env, []
+  | ins::tail ->
+    let new_env, instr_list = (match ins with
+      | BINOP op -> compile_binop env op
+      | CONST x  -> let space, new_env1 = env#allocate       in new_env1, [Mov (L x, space)]
+      | LD x     -> let space, new_env1 = env#allocate       in
+                    let var             = env#loc x          in new_env1, make_move var space
+      | ST x     -> let value, new_env1 = (env#global x)#pop in
+                    let var             = env#loc x          in new_env1, make_move value var
+      | LABEL l  -> env, [Label l]
+      | JMP l    -> env, [Jmp l]
+      | CJMP (c, l) -> let var, new_env1 = env#pop           in new_env1, [Binop ("cmp", L 0, var); CJmp (c, l)]
+      | CALL (f, argCnt, flag) ->  let f = (match f with
+                                            | "read" -> "Lread"
+                                            | "write" -> "Lwrite"
+                                            | _ -> f
+                                            ) in
+                                   let accum = (fun (env, args) _ -> let var, new_env = env#pop in (new_env, var :: args)) in
+                                   let (env, args) = List.fold_left accum (env, []) (list_init argCnt) in
+                                   let pushArgs = List.map (fun x -> Push x) args in
+                                   let (env, result) = if flag then
+                                                          let (space, new_env) = env#allocate in new_env, [Mov (eax, space)]
+                                                       else
+                                                          env, [] in
+                                   env, pushArgs @ [Call f; binop "+" (L (argCnt * word_size)) esp] @ result
+      | BEGIN (f, args, locals) -> let pushRegs = List.map (fun x -> Push (R x)) (list_init num_of_regs) in
+                                   let prolog = [Push ebp; Mov (esp, ebp)] in
+                                   let env = env#enter f args locals in
+                                   env, prolog @ pushRegs @ [binop "-" (M ("$" ^ env#lsize)) esp]
+      | END -> let popRegs = List.map (fun x -> Pop (R x)) (List.rev (list_init num_of_regs)) in
+               let meta = [Meta (Printf.sprintf "\t.set %s, %d" env#lsize (env#allocated * word_size))] in
+               let epilogue = [Mov (ebp, esp); Pop ebp; Ret] in
+               env, [Label env#epilogue] @ popRegs @ epilogue @ meta
+      | RET flag -> if flag then
+                       let var, new_env = env#pop in
+                       env, [Mov (var, eax); Jmp env#epilogue]
+                    else
+                       env, [Jmp env#epilogue]
+      ) in
+    let result_env, result_inst_list = compile new_env tail in
+    result_env, (instr_list @ result_inst_list)
 
 (* Environment implementation *)
 let make_assoc l = List.combine l (List.init (List.length l) (fun x -> x))
@@ -308,20 +362,9 @@ class env =
 
     (* registers a global variable in the environment *)
     method global x  = {< globals = S.add ("global_" ^ x) globals >}
-
-    (* registers a string constant *)
-    method string x =
-      try M.find x stringm, self
-      with Not_found ->
-        let y = Printf.sprintf "string_%d" scount in
-        let m = M.add x y stringm in
-        y, {< scount = scount + 1; stringm = m>}
                        
     (* gets all global variables *)      
     method globals = S.elements globals
-
-    (* gets all string definitions *)      
-    method strings = M.bindings stringm
 
     (* gets a number of stack positions allocated *)
     method allocated = stack_slots                                
@@ -337,14 +380,8 @@ class env =
     method lsize = Printf.sprintf "L%s_SIZE" fname
 
     (* returns a list of live registers *)
-    method live_registers depth =
-      let rec inner d acc = function
-      | []             -> acc
-      | (R _ as r)::tl -> inner (d+1) (if d >= depth then (r::acc) else acc) tl
-      | _::tl          -> inner (d+1) acc tl
-      in
-      inner 0 [] stack
-       
+    method live_registers =
+          List.filter (function R _ -> true | _ -> false) stack
   end
   
 (* Generates an assembler text for a program: first compiles the program into
@@ -357,8 +394,7 @@ let genasm (ds, stmt) =
       (new env)
       ((LABEL "main") :: (BEGIN ("main", [], [])) :: SM.compile (ds, stmt))
   in
-  let data = Meta "\t.data" :: (List.map (fun s      -> Meta (Printf.sprintf "%s:\t.int\t0"         s  )) env#globals) @
-                               (List.map (fun (s, v) -> Meta (Printf.sprintf "%s:\t.string\t\"%s\"" v s)) env#strings) in 
+  let data = Meta "\t.data" :: (List.map (fun s -> Meta (s ^ ":\t.int\t0")) env#globals) in
   let asm = Buffer.create 1024 in
   List.iter
     (fun i -> Buffer.add_string asm (Printf.sprintf "%s\n" @@ show i))
